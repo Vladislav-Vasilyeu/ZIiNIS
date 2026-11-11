@@ -26,9 +26,10 @@ logs/
 
 # Local output and generated documents
 /стеготекст.txt
-/NeuralTextStego/stego*.txt
-/NeuralTextStego/*_output.txt
-/NeuralTextStego/experiments/results/
+/NeuralTextStego_V3/stego*.txt
+/NeuralTextStego_V3/*_output.txt
+/NeuralTextStego_V3/experiments/results/
+/NeuralTextStego_V3/data/ui_state.json
 
 # Model weights and local Ollama data
 *.gguf

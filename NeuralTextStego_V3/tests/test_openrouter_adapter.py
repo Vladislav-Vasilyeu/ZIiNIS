@@ -155,14 +155,15 @@ class OpenRouterAdapterTests(unittest.IsolatedAsyncioTestCase):
                 )
 
     def test_factory_exposes_all_supported_methods(self):
-        self.assertIsInstance(create_adapter("openrouter"), OpenRouterAdapter)
         self.assertIsInstance(create_adapter("ollama"), OllamaAdapter)
         self.assertIsInstance(create_adapter("classic"), ClassicSynonymAdapter)
         with self.assertRaises(ValueError):
+            create_adapter("openrouter")
+        with self.assertRaises(ValueError):
             create_adapter("unsupported")
 
-    def test_openrouter_is_the_only_default_provider(self):
-        self.assertEqual(Settings.model_fields["default_provider"].default, "openrouter")
+    def test_default_logits_provider_is_ollama(self):
+        self.assertEqual(Settings.model_fields["default_logits_provider"].default, "ollama")
 
 
 if __name__ == "__main__":
