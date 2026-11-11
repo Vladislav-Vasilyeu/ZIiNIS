@@ -19,7 +19,7 @@ class TookenClubProvider(LogitsProvider):
         self.model = model or settings.tooken_club_model
         self._client: httpx.AsyncClient | None = None
 
-    async def _chat(self, prompt: str, **options: Any) -> dict[str, Any]:
+    def _ensure(self) -> httpx.AsyncClient:
         if self._client is None:
             key = settings.tooken_club_api_key.strip()
             if not key:
@@ -29,8 +29,17 @@ class TookenClubProvider(LogitsProvider):
                 headers={"Authorization": f"Bearer {key}"},
                 timeout=settings.api_timeout,
             )
+        return self._client
+
+    async def list_models(self) -> list[str]:
+        response = await self._ensure().get("models")
+        response.raise_for_status()
+        return sorted({item["id"] for item in response.json()["data"]})
+
+    async def _chat(self, prompt: str, **options: Any) -> dict[str, Any]:
+        client = self._ensure()
         try:
-            response = await self._client.post(
+            response = await client.post(
                 "chat/completions",
                 json={
                     "model": self.model,

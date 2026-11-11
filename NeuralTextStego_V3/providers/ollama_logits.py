@@ -27,6 +27,12 @@ class OllamaLogitsProvider(LogitsProvider):
             )
         return self._client
 
+    async def list_models(self) -> list[str]:
+        client = await self._ensure()
+        response = await client.get("/api/tags")
+        response.raise_for_status()
+        return sorted({item["name"] for item in response.json()["models"]})
+
     def _parse_logprobs_payload(self, data: dict[str, Any], top_k: int) -> list[TokenCandidate]:
         """Разбор ответа Ollama (generate/chat) с logprobs."""
         # Формат с Ollama >= 0.12: data["logprobs"] = [{token, logprob, top_logprobs: [...]}]

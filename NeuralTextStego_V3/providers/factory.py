@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from providers.base import LogitsProvider
 from providers.ollama_logits import OllamaLogitsProvider
 
 from providers.tooken_club import TookenClubProvider
@@ -17,7 +16,7 @@ def create_logits_provider(
     name: str,
     *,
     model: str | None = None,
-) -> LogitsProvider:
+) -> OllamaLogitsProvider | TookenClubProvider:
     key = (name or "ollama").lower().strip()
     if key == "ollama":
         return OllamaLogitsProvider(model=model)

@@ -14,7 +14,7 @@ import customtkinter as ctk
 
 from config import settings
 from methods.registry import METHOD_LABELS, NEURAL_KINDS, create_method
-from providers.factory import LOGITS_PROVIDERS
+from providers.factory import LOGITS_PROVIDERS, create_logits_provider
 from utils.cover_generator import generate_cover_for_secret_async, generate_cover_local
 from utils.file_handlers import load_text, save_text
 from utils.experiment_results import write_experiment_csv
@@ -58,6 +58,7 @@ class NeuralTextStegoApp(ctk.CTk):
         self._ui_state = {
             "method": settings.default_method,
             "provider": settings.default_logits_provider,
+            "models": {},
             "use_marker": settings.use_marker_by_default,
         }
         path = self._state_path()
@@ -66,6 +67,8 @@ class NeuralTextStegoApp(ctk.CTk):
                 saved = json.loads(path.read_text(encoding="utf-8"))
                 if saved.get("provider") not in LOGITS_PROVIDERS:
                     saved.pop("provider", None)
+                if not isinstance(saved.get("models"), dict):
+                    saved.pop("models", None)
                 self._ui_state.update(saved)
             except Exception:
                 pass
@@ -74,6 +77,7 @@ class NeuralTextStegoApp(ctk.CTk):
         self._ui_state["method"] = self._selected_method()
         self._ui_state["provider"] = self._selected_provider()
         self._ui_state["use_marker"] = bool(self.use_marker_var.get())
+        self._ui_state["models"][self._ui_state["provider"]] = self._selected_model()
         try:
             self._state_path().write_text(
                 json.dumps(self._ui_state, ensure_ascii=False, indent=2),
@@ -103,6 +107,7 @@ class NeuralTextStegoApp(ctk.CTk):
         ).grid(row=1, column=0, sticky="w", padx=20, pady=(0, 10))
 
         self.provider_var = ctk.StringVar(value=LOGITS_PROVIDERS[self._ui_state["provider"]])
+        self.model_catalogs: dict[str, list[str]] = {}
         ctk.CTkLabel(header, text="Провайдер", text_color=MUTED).grid(
             row=0, column=1, rowspan=2, padx=(8, 4)
         )
@@ -110,8 +115,23 @@ class NeuralTextStegoApp(ctk.CTk):
             header,
             values=list(PROVIDER_BY_LABEL),
             variable=self.provider_var,
-            command=lambda _: self._save_ui_state(),
-        ).grid(row=0, column=2, rowspan=2, padx=(4, 20))
+            command=self._change_provider,
+            width=120,
+        ).grid(row=0, column=2, rowspan=2, padx=(4, 10))
+        ctk.CTkLabel(header, text="Модель", text_color=MUTED).grid(
+            row=0, column=3, rowspan=2, padx=(0, 4)
+        )
+        self.model_menu = ctk.CTkComboBox(
+            header, width=180, command=lambda _: self._save_ui_state(),
+        )
+        self.model_menu.grid(row=0, column=4, rowspan=2, padx=4)
+        self.model_menu.bind("<Return>", lambda _: self._save_ui_state())
+        self.model_menu.bind("<FocusOut>", lambda _: self._save_ui_state())
+        self.btn_models = ctk.CTkButton(
+            header, text="Загрузить модели", width=128, command=self._refresh_models,
+        )
+        self.btn_models.grid(row=0, column=5, rowspan=2, padx=(4, 16))
+        self._show_provider_model()
 
         self.tabview = ctk.CTkTabview(
             self,
@@ -353,6 +373,52 @@ class NeuralTextStegoApp(ctk.CTk):
     def _selected_provider(self) -> str:
         return PROVIDER_BY_LABEL[self.provider_var.get()]
 
+    def _selected_model(self) -> str | None:
+        return self.model_menu.get().strip() or None
+
+    def _show_provider_model(self) -> None:
+        provider = self._selected_provider()
+        default = create_logits_provider(provider).model
+        saved = self._ui_state["models"].get(provider)
+        model = saved if isinstance(saved, str) and saved else default
+        self.model_menu.configure(values=list(dict.fromkeys(
+            [default, model, *self.model_catalogs.get(provider, [])]
+        )))
+        self.model_menu.set(model)
+
+    def _change_provider(self, _: str) -> None:
+        previous = self._ui_state["provider"]
+        self._ui_state["models"][previous] = self._selected_model()
+        self._show_provider_model()
+        self._save_ui_state()
+
+    def _refresh_models(self) -> None:
+        provider_name = self._selected_provider()
+        label = LOGITS_PROVIDERS[provider_name]
+        self.btn_models.configure(state="disabled")
+        self._set_status(f"Загрузка списка моделей {label}…")
+
+        async def task():
+            provider = create_logits_provider(provider_name)
+            try:
+                return await provider.list_models()
+            finally:
+                await provider.close()
+
+        def done(models, error):
+            self.btn_models.configure(state="normal")
+            if error:
+                self._set_status(f"Ошибка загрузки моделей {label}")
+                messagebox.showerror("Ошибка загрузки моделей", str(error))
+                return
+            self.model_catalogs[provider_name] = models
+            if self._selected_provider() == provider_name:
+                self._save_ui_state()
+                self._show_provider_model()
+            self._set_status(f"Модели {label}: {len(models)}")
+
+        self._run_async(task(), done)
+
     def _selected_method(self) -> str:
         return LABEL_TO_KEY.get(self.embed_method_var.get(), "classic_synonyms")
 
@@ -419,12 +485,13 @@ class NeuralTextStegoApp(ctk.CTk):
             return
         method_key = LABEL_TO_KEY.get(self.embed_method_var.get(), "classic_synonyms")
         provider = self._selected_provider()
+        model = self._selected_model()
         self._set_status(f"Генерация контейнера через {LOGITS_PROVIDERS[provider]}…")
         self._set_progress(0.2)
 
         async def task():
             return await generate_cover_for_secret_async(
-                secret, method=method_key, provider_name=provider,
+                secret, method=method_key, provider_name=provider, model=model,
                 allow_local_fallback=provider != "tooken_club",
             )
 
@@ -482,7 +549,7 @@ class NeuralTextStegoApp(ctk.CTk):
                 result = loop.run_until_complete(coro)
                 self.after(0, lambda: on_done(result, None))
             except Exception as exc:
-                self.after(0, lambda: on_done(None, exc))
+                self.after(0, lambda error=exc: on_done(None, error))
             finally:
                 loop.close()
 
@@ -511,10 +578,11 @@ class NeuralTextStegoApp(ctk.CTk):
 
         password = self.embed_password.get().strip() or None
         provider = self._selected_provider()
+        model = self._selected_model()
         use_marker = bool(self.use_marker_var.get())
 
         async def task():
-            method = create_method(method_key, logits_provider=provider)
+            method = create_method(method_key, logits_provider=provider, model=model)
 
             async def progress(p, msg):
                 self.after(0, lambda: (self._set_progress(p), self._set_status(msg)))
@@ -571,11 +639,12 @@ class NeuralTextStegoApp(ctk.CTk):
 
         password = self.extract_password.get().strip() or None
         provider = self._selected_provider()
+        model = self._selected_model()
         use_marker = bool(self.extract_marker_var.get())
         prompt = self.extract_prompt.get()
 
         async def task():
-            method = create_method(method_key, logits_provider=provider)
+            method = create_method(method_key, logits_provider=provider, model=model)
 
             async def progress(p, msg):
                 self.after(0, lambda: (self._set_progress(p), self._set_status(msg)))
@@ -621,6 +690,7 @@ class NeuralTextStegoApp(ctk.CTk):
         secret = self.exp_secret.get().strip() or "test"
         method_key = LABEL_TO_KEY.get(self.exp_method_var.get(), "classic_synonyms")
         provider = self._selected_provider()
+        model = self._selected_model()
         use_marker = bool(self.exp_marker_var.get())
         cover = generate_cover_local(secret, method_key, seed=42)
 
@@ -633,7 +703,7 @@ class NeuralTextStegoApp(ctk.CTk):
             out_dir = settings.project_root / "experiments" / "results"
             out_dir.mkdir(parents=True, exist_ok=True)
             for i in range(runs):
-                method = create_method(method_key, logits_provider=provider)
+                method = create_method(method_key, logits_provider=provider, model=model)
                 t0 = time.perf_counter()
                 try:
                     emb = await method.embed(
