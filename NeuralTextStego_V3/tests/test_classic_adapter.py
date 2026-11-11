@@ -1,10 +1,37 @@
 import unittest
 
-from adapters.classic import ClassicSynonymAdapter
-from core.stego_engine import StegoEngine
+from adapters.classic import (
+    _SYNONYM_GROUPS,
+    ClassicSynonymAdapter,
+    synonym_codebook,
+)
+from core.stego_engine import WORD_PATTERN, StegoEngine
+from utils.file_handlers import load_text
 
 
 class ClassicSynonymAdapterTests(unittest.IsolatedAsyncioTestCase):
+    def test_codebook_variants_keep_the_same_decoding_order(self):
+        for candidate_count in (2, 4):
+            for group in _SYNONYM_GROUPS:
+                for word in group:
+                    codebook = synonym_codebook(word, candidate_count)
+                    if len(codebook) < 2:
+                        continue
+                    expected = [candidate.casefold() for candidate in codebook]
+                    for variant in codebook:
+                        with self.subTest(word=word, variant=variant, candidates=candidate_count):
+                            actual = [
+                                candidate.casefold()
+                                for candidate in synonym_codebook(variant, candidate_count)
+                            ]
+                            self.assertEqual(actual, expected)
+
+    def test_sample_cover_contains_expanded_dictionary_vocabulary(self):
+        cover = load_text("data/sample_cover.txt")
+        words = [match.group() for match in WORD_PATTERN.finditer(cover)]
+        supported = {word.casefold() for word in words if len(synonym_codebook(word, 4)) >= 2}
+        self.assertGreaterEqual(len(supported), 35)
+
     async def test_returns_deterministic_case_aware_candidates(self):
         adapter = ClassicSynonymAdapter()
         first = await adapter.get_replacement_candidates(

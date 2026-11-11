@@ -58,6 +58,19 @@ _SYNONYM_GROUPS = (
     ("естественная", "натуральная", "природная", "обычная", "непринуждённая"),
     ("естественное", "натуральное", "природное", "обычное", "непринуждённое"),
     ("естественные", "натуральные", "природные", "обычные", "непринуждённые"),
+    ("задача", "проблема", "вопрос", "задание", "цель"),
+    ("возможность", "перспектива", "потенциал", "шанс", "задел"),
+    ("область", "сфера", "направление", "отрасль", "дисциплина"),
+    ("проект", "разработка", "инициатива", "продукт", "решение"),
+    ("пользователь", "клиент", "читатель", "автор", "адресат"),
+    ("проверка", "контроль", "обследование", "аудит", "инспекция"),
+    ("точность", "корректность", "достоверность", "верность", "правильность"),
+    ("обмен", "взаимодействие", "коммуникация", "контакт", "связь"),
+    ("охрана", "защита", "сохранность", "безопасность", "оборона"),
+    ("обработка", "переработка", "преобразование", "трансформация", "модификация"),
+    ("хранение", "архивация", "размещение", "накопление", "учёт"),
+    ("показатель", "критерий", "параметр", "метрика", "индикатор"),
+    ("результат", "итог", "эффект", "вывод", "следствие"),
 )
 
 _SYNONYMS = {
@@ -73,6 +86,45 @@ def _match_case(source: str, replacement: str) -> str:
     if source[:1].isupper():
         return replacement[:1].upper() + replacement[1:]
     return replacement
+
+
+def _canonical_group_index(word: str) -> int | None:
+    key = word.casefold()
+    for index, group in enumerate(_SYNONYM_GROUPS):
+        if key in {item.casefold() for item in group}:
+            return index
+    return None
+
+
+def synonym_codebook(word: str, num_candidates: int) -> list[str]:
+    """
+    Стабильный кодовый набор синонимов, включающий само слово.
+
+    Индекс слова в наборе — это встраиваемые биты, поэтому извлечение
+    не требует исходного контейнера.
+    """
+    key = word.casefold()
+    for group_index, group in enumerate(_SYNONYM_GROUPS):
+        folded = tuple(item.casefold() for item in group)
+        if key not in folded:
+            continue
+        n = 4 if num_candidates >= 4 and len(group) >= 4 else 2
+        if len(group) < n:
+            return []
+        # A word may occur in multiple synonym groups. Keep only alternatives
+        # that resolve back to this same group during extraction, otherwise a
+        # replacement can decode to a different bit index.
+        stable = [
+            item for item in group[:n]
+            if _canonical_group_index(item) == group_index
+        ]
+        if key not in {item.casefold() for item in stable}:
+            return []
+        # Binary coding supports exactly 1 or 2 bits per word.
+        if len(stable) == 3:
+            stable = stable[:2]
+        return [_match_case(word, item) for item in stable]
+    return []
 
 
 class ClassicSynonymAdapter(BaseLLMAdapter):
