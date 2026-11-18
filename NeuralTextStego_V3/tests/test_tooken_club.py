@@ -32,7 +32,7 @@ async def test_tooken_club_chat_and_ranked_logprobs():
 
     client_factory = httpx.AsyncClient
     with patch.object(settings, "tooken_club_api_key", "test-key"), patch(
-        "providers.tooken_club.httpx.AsyncClient",
+        "providers.openai_compatible.httpx.AsyncClient",
         side_effect=lambda **kwargs: client_factory(transport=httpx.MockTransport(handle), **kwargs),
     ):
         try:

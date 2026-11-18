@@ -1,6 +1,6 @@
 """
 Генерация стегоконтейнера:
-- через LLM (Ollama / Tooken Club) — основной путь;
+- через LLM (Ollama / Tooken Club / Groq) — основной путь;
 - локальный шаблон — запасной, если сеть/модель недоступны.
 """
 
@@ -108,7 +108,7 @@ async def generate_cover_for_secret_async(
     allow_local_fallback: bool = True,
 ) -> str:
     """
-    Сгенерировать контейнер через нейросеть (Ollama/Tooken Club).
+    Сгенерировать контейнер через нейросеть (Ollama/Tooken Club/Groq).
     При ошибке — локальный шаблон.
     """
     if not secret or not secret.strip():

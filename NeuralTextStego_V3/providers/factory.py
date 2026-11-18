@@ -5,10 +5,12 @@ from __future__ import annotations
 from providers.ollama_logits import OllamaLogitsProvider
 
 from providers.tooken_club import TookenClubProvider
+from providers.groq import GroqProvider
 
 LOGITS_PROVIDERS = {
     "ollama": "Ollama",
     "tooken_club": "Tooken Club",
+    "groq": "Groq",
 }
 
 
@@ -16,12 +18,14 @@ def create_logits_provider(
     name: str,
     *,
     model: str | None = None,
-) -> OllamaLogitsProvider | TookenClubProvider:
+) -> OllamaLogitsProvider | TookenClubProvider | GroqProvider:
     key = (name or "ollama").lower().strip()
     if key == "ollama":
         return OllamaLogitsProvider(model=model)
     if key == "tooken_club":
         return TookenClubProvider(model=model)
+    if key == "groq":
+        return GroqProvider(model=model)
     if key == "openrouter":
         raise ValueError("Провайдер OpenRouter отключён.")
     raise ValueError(
