@@ -17,6 +17,7 @@ class OllamaLogitsProvider(LogitsProvider):
     def __init__(self, model: str | None = None, base_url: str | None = None) -> None:
         self.model = model or settings.ollama_model
         self.base_url = (base_url or settings.ollama_base_url).rstrip("/")
+        self.raw_continuation = settings.ollama_raw_continuation
         self._client: httpx.AsyncClient | None = None
 
     async def _ensure(self) -> httpx.AsyncClient:
@@ -80,6 +81,8 @@ class OllamaLogitsProvider(LogitsProvider):
         body: dict[str, Any] = {
             "model": self.model,
             "prompt": prompt,
+            # Keep the generated prefix inside the same continuation context.
+            "raw": self.raw_continuation,
             "stream": False,
             "logprobs": True,
             "top_logprobs": top_k,
@@ -111,6 +114,12 @@ class OllamaLogitsProvider(LogitsProvider):
                 result = self._parse_logprobs_payload(data, top_k)
                 if len(result) >= 2:
                     return result
+
+                if self.raw_continuation:
+                    raise RuntimeError(
+                        "Ollama не вернула top_logprobs для продолжения текста. "
+                        "Обновите сервер или выберите модель с поддержкой logprobs."
+                    )
 
                 # Fallback: /api/chat с logprobs
                 chat_body = {

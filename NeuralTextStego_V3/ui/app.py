@@ -362,6 +362,7 @@ class NeuralTextStegoApp(ctk.CTk):
             "Нейросетевые методы генерируют продолжение промпта, кодируя биты\n"
             "в выборе следующего токена по top-logprobs Ollama или Tooken Club.\n"
             "Нужна модель с поддержкой logprobs. Для генерации контейнера достаточно обычного чата.\n\n"
+            "Groq поддерживает генерацию контейнера. Logprobs у Groq пока недоступны.\n\n"
             "Маркер — невидимые символы с полным секретом и контрольной суммой.\n"
             "Если маркер выключен, секрет кодируется только в самом тексте:\n"
             "для нейросетевых методов при извлечении укажите тот же промпт."
@@ -492,7 +493,7 @@ class NeuralTextStegoApp(ctk.CTk):
         async def task():
             return await generate_cover_for_secret_async(
                 secret, method=method_key, provider_name=provider, model=model,
-                allow_local_fallback=provider != "tooken_club",
+                allow_local_fallback=provider == "ollama",
             )
 
         def done(cover, error):

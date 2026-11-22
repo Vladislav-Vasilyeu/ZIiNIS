@@ -23,9 +23,12 @@ class Settings(BaseSettings):
     openrouter_model: str = "openrouter/free"
     tooken_club_api_key: str = Field(default="", repr=False)
     tooken_club_model: str = "gpt-5.5"
+    groq_api_key: str = Field(default="", repr=False)
+    groq_model: str = "openai/gpt-oss-20b"
     ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_model: str = "qwen2.5:3b"
     ollama_num_ctx: int = 2048
+    ollama_raw_continuation: bool = True
 
     # --- Метод по умолчанию ---
     default_method: Literal[
@@ -35,7 +38,7 @@ class Settings(BaseSettings):
         "neural_arithmetic",
         "neural_sampling",
     ] = "classic_synonyms"
-    default_logits_provider: Literal["ollama", "tooken_club"] = "ollama"
+    default_logits_provider: Literal["ollama", "tooken_club", "groq"] = "ollama"
 
     @field_validator("default_logits_provider", mode="before")
     @classmethod
