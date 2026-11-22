@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_model: str = "qwen2.5:3b"
     ollama_num_ctx: int = 2048
+    ollama_raw_continuation: bool = True
 
     # --- Метод по умолчанию ---
     default_method: Literal[

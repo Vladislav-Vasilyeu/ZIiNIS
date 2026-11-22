@@ -7,6 +7,7 @@ from typing import Any
 from methods.base import MethodKind, MethodResult, ProgressCallback, StegoMethod
 from methods.neural_common import NeuralGenerativeCodec
 from providers.base import LogitsProvider
+from providers.ollama_logits import OllamaLogitsProvider
 
 
 class _NeuralBase(StegoMethod):
@@ -30,6 +31,26 @@ class _NeuralBase(StegoMethod):
         )
 
     async def extract(self, **kwargs: Any) -> MethodResult:
+        result = await self._extract_with_current_provider(**kwargs)
+        cancelled = kwargs.get("cancel_event")
+        if (
+            not result.success
+            and isinstance(self._provider, OllamaLogitsProvider)
+            and self._provider.raw_continuation
+            and not (cancelled and cancelled.is_set())
+        ):
+            # Older unmarked texts used a fresh chat template at every step.
+            self._provider.raw_continuation = False
+            try:
+                legacy = await self._extract_with_current_provider(**kwargs)
+                if legacy.success:
+                    legacy.details["legacy_chat_context"] = True
+                    return legacy
+            finally:
+                self._provider.raw_continuation = True
+        return result
+
+    async def _extract_with_current_provider(self, **kwargs: Any) -> MethodResult:
         return await self._codec.extract(
             stego_text=kwargs.get("stego_text", ""),
             prompt=kwargs.get("prompt") or "",

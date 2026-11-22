@@ -179,6 +179,13 @@ class NeuralGenerativeCodec:
             token = cand.token
             if not token or token in seen:
                 continue
+            # A prefix-free codebook lets the decoder identify token boundaries.
+            # Legacy Ollama texts used the original unfiltered candidate list.
+            if getattr(self.provider, "raw_continuation", True) and any(
+                token.startswith(item.token) or item.token.startswith(token)
+                for item in clean
+            ):
+                continue
             seen.add(token)
             clean.append(cand)
         return clean
