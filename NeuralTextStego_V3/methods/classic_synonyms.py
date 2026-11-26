@@ -62,7 +62,7 @@ class ClassicSynonymsMethod(StegoMethod):
             return MethodResult(success=False, message=f"Ошибка подготовки секрета: {exc}")
 
         positions = self._positions(cover_text)
-        if not positions:
+        if not positions and not use_marker:
             return MethodResult(
                 success=False,
                 message="Во встроенном словаре нет подходящих слов для замены",
@@ -106,7 +106,7 @@ class ClassicSynonymsMethod(StegoMethod):
                 if hasattr(maybe, "__await__"):
                     await maybe
 
-        if used == 0:
+        if used == 0 and not use_marker:
             return MethodResult(success=False, message="Не удалось закодировать ни одного бита")
 
         stego = append_marker_if_needed("".join(chars), payload, use_marker)

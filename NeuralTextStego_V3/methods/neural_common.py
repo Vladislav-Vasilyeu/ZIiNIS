@@ -214,6 +214,13 @@ class NeuralGenerativeCodec:
             return MethodResult(success=False, message=f"Ошибка подготовки секрета: {exc}")
 
         needed = len(bits)
+        if not use_marker and needed > self.max_tokens * self.chunk_bits:
+            return MethodResult(
+                success=False,
+                message=(f"Сообщение требует {needed} бит, но за {self.max_tokens} токенов "
+                         f"можно записать не более {self.max_tokens * self.chunk_bits} бит. "
+                         "Сократите сообщение или увеличьте лимит токенов."),
+            )
         bit_pos = 0
         generated = ""
         steps = 0

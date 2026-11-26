@@ -34,9 +34,36 @@ class OpenAICompatibleProvider(LogitsProvider):
         return self._client
 
     async def list_models(self) -> list[str]:
-        response = await self._ensure().get("models")
-        response.raise_for_status()
-        return sorted({item["id"] for item in response.json()["data"]})
+        try:
+            response = await self._ensure().get("models")
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise self._http_error(exc.response.status_code) from exc
+        except httpx.RequestError as exc:
+            raise RuntimeError(f"Нет соединения с {self.label}. Проверьте сеть и повторите запрос.") from exc
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise RuntimeError(f"{self.label}: некорректный JSON каталога моделей.") from exc
+        items = data.get("data") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            raise RuntimeError(f"{self.label}: каталог моделей не содержит список data.")
+        models = sorted({item["id"] for item in items
+                         if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"].strip()})
+        if not models:
+            raise RuntimeError(f"{self.label}: список моделей пуст. ID можно ввести вручную.")
+        return models
+
+    def _http_error(self, status: int) -> RuntimeError:
+        hint = {
+            400: "Проверьте модель и поддержку параметров запроса.",
+            401: "Проверьте API-ключ в .env и перезапустите приложение.",
+            402: "Проверьте баланс и доступ к модели в кабинете провайдера.",
+            403: "Ключу запрещён доступ к этой модели или сервису.",
+            404: "Модель или endpoint не найдены. Обновите список моделей.",
+            429: "Превышен лимит запросов или квота. Подождите и проверьте лимиты провайдера.",
+        }.get(status, "Сервис временно недоступен. Повторите запрос позже." if status >= 500 else "Проверьте настройки провайдера.")
+        return RuntimeError(f"{self.label}: HTTP {status} для модели {self.model}. {hint}")
 
     async def _chat(self, prompt: str, **options: Any) -> dict[str, Any]:
         client = self._ensure()
@@ -49,8 +76,10 @@ class OpenAICompatibleProvider(LogitsProvider):
                     **options,
                 },
             )
+        except httpx.TimeoutException as exc:
+            raise RuntimeError(f"{self.label}: превышено время ожидания. Повторите запрос или выберите другую модель.") from exc
         except httpx.RequestError as exc:
-            raise RuntimeError(f"Не удалось выполнить запрос к {self.label}.") from exc
+            raise RuntimeError(f"Не удалось выполнить запрос к {self.label}. Проверьте подключение к сети.") from exc
 
         try:
             data = response.json()
@@ -62,9 +91,7 @@ class OpenAICompatibleProvider(LogitsProvider):
             error = data.get("error")
             if options.get("logprobs") and isinstance(error, dict) and error.get("code") == "unsupported_feature":
                 raise self._missing_logprobs()
-            raise RuntimeError(
-                f"{self.label}: HTTP {response.status_code} для модели {self.model}."
-            )
+            raise self._http_error(response.status_code)
         choices = data.get("choices")
         if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
             raise RuntimeError(f"{self.label} вернул ответ без choices.")

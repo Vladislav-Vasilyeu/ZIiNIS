@@ -17,7 +17,8 @@ def load_text(path: str | Path) -> str:
 
     suffix = path.suffix.lower()
     if suffix == ".txt":
-        return path.read_text(encoding="utf-8")
+        with path.open("r", encoding="utf-8-sig", newline="") as stream:
+            return stream.read()
     if suffix == ".docx":
         doc = Document(str(path))
         paragraphs = [p.text for p in doc.paragraphs]
@@ -32,7 +33,8 @@ def save_text(path: str | Path, text: str) -> None:
 
     suffix = path.suffix.lower()
     if suffix == ".txt":
-        path.write_text(text, encoding="utf-8")
+        with path.open("w", encoding="utf-8", newline="") as stream:
+            stream.write(text)
         return
     if suffix == ".docx":
         doc = Document()
