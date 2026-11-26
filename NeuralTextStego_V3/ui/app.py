@@ -20,7 +20,7 @@ from utils.cover_generator import generate_cover_for_secret_async, generate_cove
 from utils.file_handlers import load_text, save_text
 from utils.experiment_results import write_experiment_csv
 from utils.logger import setup_logger
-from utils.capacity import assess_capacity, payload_size
+from utils.capacity import assess_capacity, payload_size, plan_cover
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -233,9 +233,8 @@ class NeuralTextStegoApp(ctk.CTk):
         tab.grid_rowconfigure(6, weight=2)
         self.embed_method_var, self.use_marker_var = self._method_frame(tab, 0)
 
-        ctk.CTkLabel(tab, text="Контейнер / промпт", text_color=MUTED).grid(
-            row=1, column=0, sticky="w", padx=12, pady=(4, 0)
-        )
+        self.cover_label = ctk.CTkLabel(tab, text="Текст-контейнер", text_color=MUTED)
+        self.cover_label.grid(row=1, column=0, sticky="w", padx=12, pady=(4, 0))
         ctk.CTkLabel(tab, text="Секретное сообщение", text_color=MUTED).grid(
             row=1, column=1, sticky="w", padx=12, pady=(4, 0)
         )
@@ -430,6 +429,7 @@ class NeuralTextStegoApp(ctk.CTk):
             self._capacity_after = self.after(500, self._watch_capacity)
             return
         self._capacity_inputs = hash(inputs)
+        self.cover_label.configure(text="Исходный контекст (промпт)" if inputs[2] in NEURAL_KINDS else "Текст-контейнер")
         try:
             capacity = assess_capacity(*inputs[:3], password=inputs[3], use_marker=inputs[4])
             if capacity:
@@ -437,7 +437,9 @@ class NeuralTextStegoApp(ctk.CTk):
                 self.capacity_label.configure(text=capacity.describe() + suffix,
                     text_color=MUTED if capacity.sufficient else DANGER)
             else:
-                self.capacity_label.configure(text="Нейросетевой метод: ёмкость определяется при генерации токенов")
+                plan = plan_cover(inputs[1], inputs[2], password=inputs[3], use_marker=inputs[4])
+                self.capacity_label.configure(text=(f"Нагрузка: {plan.required_bits} бит · минимум {plan.minimum_positions} "
+                    f"шагов генерации · лимит {settings.max_gen_tokens}. Точная длина зависит от модели."))
         except ValueError as exc:
             self.capacity_label.configure(text=str(exc), text_color=DANGER)
         self._capacity_after = self.after(500, self._watch_capacity)
@@ -579,14 +581,26 @@ class NeuralTextStegoApp(ctk.CTk):
         provider = self._selected_provider()
         model = self._selected_model()
         password = self.embed_password.get() or None
-        self._set_status(f"Генерация контейнера через {LOGITS_PROVIDERS[provider]}…")
+        use_marker = bool(self.use_marker_var.get())
+        try:
+            plan = plan_cover(secret, method_key, password=password, use_marker=use_marker)
+        except ValueError as exc:
+            messagebox.showwarning("Проверка сообщения", str(exc))
+            return
+        if method_key in NEURAL_KINDS and not use_marker and plan.minimum_positions > settings.max_gen_tokens:
+            messagebox.showwarning("Сообщение превышает лимит",
+                f"Нужно не менее {plan.minimum_positions} шагов, лимит — {settings.max_gen_tokens}. "
+                "Сократите сообщение или увеличьте MAX_GEN_TOKENS в .env и перезапустите приложение.")
+            return
+        self._set_status(f"Подготовка через {LOGITS_PROVIDERS[provider]}: {plan.required_bits} бит нагрузки…")
+        self._set_metrics(f"Полезная нагрузка: {plan.payload_bytes} байт · ориентир: {plan.target_words} слов")
         self._set_progress(0.2)
 
         async def task():
             return await generate_cover_for_secret_async(
                 secret, method=method_key, provider_name=provider, model=model,
                 allow_local_fallback=provider == "ollama",
-                password=password, return_report=True,
+                password=password, return_report=True, use_marker=use_marker,
             )
 
         def done(cover, error):
@@ -598,12 +612,12 @@ class NeuralTextStegoApp(ctk.CTk):
             cover, source = cover
             self.cover_text.delete("1.0", tk.END)
             self.cover_text.insert("1.0", cover)
-            bits = len(secret.encode("utf-8")) * 8
-            self._set_status(
-                f"Сгенерирован стегоконтейнер ({len(secret)} симв. секрета, ~{bits} бит), "
-                f"метод={method_key}, источник: {source}"
-            )
-            self._set_metrics(f"контейнер: {len(cover)} символов · секрет: {len(secret)} символов")
+            capacity = assess_capacity(cover, secret, method_key, password=password, use_marker=use_marker)
+            if capacity:
+                self._set_status(f"Готово: {capacity.describe()} · источник: {source}")
+            else:
+                self._set_status(f"Промпт подготовлен · источник: {source}. Стеготекст создаст кнопка «Внедрить».")
+            self._set_metrics(f"контейнер/контекст: {len(cover)} символов · нагрузка с заголовком: {plan.required_bits} бит")
             self._set_progress(1.0)
 
         self._run_async(task(), done)

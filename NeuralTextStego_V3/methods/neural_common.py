@@ -233,11 +233,14 @@ class NeuralGenerativeCodec:
                 dist = await self._next_dist(ctx)
             except Exception as exc:
                 logger.error(f"logprobs step failed: {exc}")
-                return MethodResult(success=False, message=str(exc))
+                return MethodResult(success=False, message=str(exc), text=generated,
+                                    bits_embedded=bit_pos, positions_used=steps)
 
             token, consumed = self._pick_token(dist, bits, bit_pos)
-            if not token or consumed <= 0:
+            if not token:
                 break
+            # Prefix filtering can leave a single unambiguous token (often a
+            # space). It carries zero bits, but may lead to a usable next step.
             generated += token
             bit_pos += consumed
             steps += 1
@@ -369,7 +372,7 @@ class NeuralGenerativeCodec:
                     details={"method": method_name, "strategy": self.strategy, "steps": steps},
                 )
             piece = self._token_to_bits(dist, token)
-            if not piece:
+            if not piece and len(dist) != 1:
                 return MethodResult(
                     success=False,
                     message="Токен стеготекста не входит в кодовый набор модели на этом шаге",

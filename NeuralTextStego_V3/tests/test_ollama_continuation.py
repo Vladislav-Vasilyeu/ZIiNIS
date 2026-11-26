@@ -40,6 +40,39 @@ async def test_raw_distribution_requires_real_logprobs():
 
 
 @pytest.mark.asyncio
+async def test_empty_eos_probes_reproducible_seeds_with_native_scores():
+    provider = OllamaLogitsProvider()
+    provider.raw_continuation = True
+    provider._client = AsyncMock()
+    seeds = []
+
+    async def respond(path, *, json):
+        seeds.append(json["options"]["seed"])
+        if len(seeds) == 1:
+            return httpx.Response(200, json={"done_reason": "stop", "response": ""})
+        return httpx.Response(200, json={"logprobs": [{"top_logprobs": [
+            {"token": " a", "logprob": -1}, {"token": " b", "logprob": -2}]}]})
+
+    provider._client.post.side_effect = respond
+    result = await provider.next_token_distribution("Prompt")
+    assert seeds == [0, 1]
+    assert [c.logprob for c in result] == [-1, -2]
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_permanent_eos_is_bounded_and_actionable():
+    provider = OllamaLogitsProvider()
+    provider.raw_continuation = True
+    provider._client = AsyncMock()
+    provider._client.post.return_value = httpx.Response(200, json={"done_reason": "stop", "response": ""})
+    with pytest.raises(RuntimeError, match="другой исходный контекст"):
+        await provider.next_token_distribution("Prompt")
+    assert provider._client.post.await_count == 8
+    await provider.close()
+
+
+@pytest.mark.asyncio
 async def test_legacy_extraction_restores_provider_mode():
     method = create_method("neural_rank", logits_provider="ollama")
     method._provider.raw_continuation = True

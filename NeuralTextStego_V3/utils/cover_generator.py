@@ -11,7 +11,7 @@ import random
 import re
 from typing import Any
 
-from utils.capacity import assess_capacity, payload_size
+from utils.capacity import assess_capacity, payload_size, plan_cover
 
 
 def ensure_cover_capacity(text: str, secret: str, method: str, *, password: str | None = None) -> str:
@@ -88,10 +88,11 @@ def generate_cover_local(secret: str, method: str = "classic_synonyms", *, seed:
     return intro + body
 
 
-def build_llm_cover_prompt(secret: str, method: str, *, password: str | None = None) -> str:
+def build_llm_cover_prompt(secret: str, method: str, *, password: str | None = None,
+                          use_marker: bool = False) -> str:
     """Промпт для LLM-генерации контейнера под секрет и метод."""
-    required = payload_size(secret, password) * 8 + 16
-    n_chars = max(400, len(secret) * 40, required * 30)
+    plan = plan_cover(secret, method, password=password, use_marker=use_marker)
+    required = plan.required_bits
     method = (method or "").lower()
     if method == "classic_whitespace":
         extra = (
@@ -111,8 +112,8 @@ def build_llm_cover_prompt(secret: str, method: str, *, password: str | None = N
             "Сделай естественное введение, которое удобно продолжать."
         )
     return (
-        f"Напиши связный научно-популярный текст на русском языке объёмом примерно "
-        f"{n_chars} символов по теме защиты информации и стеганографии. "
+        f"Напиши связный научно-популярный текст на русском языке объёмом не менее "
+        f"{plan.target_words} слов по теме защиты информации и стеганографии. "
         f"{extra} "
         "Без списков, без заголовков, без кавычек вокруг всего текста, только абзацы."
     )
@@ -127,6 +128,8 @@ async def generate_cover_for_secret_async(
     allow_local_fallback: bool = True,
     password: str | None = None,
     return_report: bool = False,
+    use_marker: bool = False,
+    max_rounds: int = 3,
 ) -> str | tuple[str, str]:
     """
     Сгенерировать контейнер через нейросеть (Ollama/Tooken Club/Groq).
@@ -135,19 +138,30 @@ async def generate_cover_for_secret_async(
     if not secret or not secret.strip():
         raise ValueError("Секрет пуст")
 
-    payload_size(secret, password)
-    prompt = build_llm_cover_prompt(secret, method, password=password)
+    method = method.lower().strip()
+    plan = plan_cover(secret, method, password=password, use_marker=use_marker)
+    prompt = build_llm_cover_prompt(secret, method, password=password, use_marker=use_marker)
     source = "нейросеть"
     try:
         from providers.factory import create_logits_provider
 
         provider = create_logits_provider(provider_name, model=model)
+        text = ""
         try:
-            if hasattr(provider, "complete_text"):
-                budget = min(4096, max(500, (payload_size(secret, password) * 8 + 16) * 8))
-                text = await provider.complete_text(prompt, max_tokens=budget)
-            else:
-                text = ""
+            for attempt in range(max(1, min(max_rounds, 5))):
+                fragment = (await provider.complete_text(prompt, max_tokens=plan.max_tokens) or "").strip()
+                if fragment:
+                    text = (text + "\n\n" + fragment).strip()
+                capacity = assess_capacity(text, secret, method, password=password, use_marker=use_marker)
+                if len(text) >= 80 and (capacity is None or capacity.sufficient):
+                    return (text, f"нейросеть: {attempt + 1} запрос(а)") if return_report else text
+                deficit = capacity.required - capacity.available if capacity else 0
+                prompt = (
+                    build_llm_cover_prompt(secret, method, password=password, use_marker=use_marker)
+                    + f" Уже подготовленного текста недостаточно: не хватает {max(0, deficit)} бит ёмкости. "
+                    "Напиши дополнительные абзацы, не повторяй прежний текст. "
+                    + "Последний фрагмент для согласования темы:\n" + text[-1200:]
+                )
         finally:
             await provider.close()
         text = (text or "").strip()

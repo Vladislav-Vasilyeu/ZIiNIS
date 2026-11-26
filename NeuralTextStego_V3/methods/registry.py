@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from config import settings
 
 from methods.base import MethodKind, StegoMethod
 from methods.classic_synonyms import ClassicSynonymsMethod
@@ -49,10 +50,10 @@ def create_method(
     if key in NEURAL_KINDS:
         provider = create_logits_provider(logits_provider, model=model)
         codec_kwargs = {
-            "chunk_bits": kwargs.get("chunk_bits", 2),
-            "top_k": kwargs.get("top_k", 20),
-            "temperature": kwargs.get("temperature", 0.8),
-            "max_tokens": kwargs.get("max_tokens", 512),
+            "chunk_bits": kwargs.get("chunk_bits", settings.rank_chunk_bits),
+            "top_k": kwargs.get("top_k", settings.top_logprobs),
+            "temperature": kwargs.get("temperature", settings.temperature),
+            "max_tokens": kwargs.get("max_tokens", settings.max_gen_tokens),
         }
         if key == MethodKind.NEURAL_RANK.value:
             return NeuralRankMethod(provider, **codec_kwargs)

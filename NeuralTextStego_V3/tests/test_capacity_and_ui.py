@@ -23,7 +23,7 @@ def test_insufficient_cloud_cover_is_expanded_and_roundtrips(monkeypatch, secret
     async def run():
         cover, source = await generate_cover_for_secret_async(
             secret, method, provider_name="tooken_club", password=password,
-            allow_local_fallback=False, return_report=True)
+            allow_local_fallback=False, return_report=True, max_rounds=1)
         assert "локальное дополнение" in source
         capacity = assess_capacity(cover, secret, method, password=password)
         assert capacity.sufficient
