@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 
 from adapters.classic import (
     _SYNONYM_GROUPS,
@@ -27,7 +28,7 @@ class ClassicSynonymAdapterTests(unittest.IsolatedAsyncioTestCase):
                             self.assertEqual(actual, expected)
 
     def test_sample_cover_contains_expanded_dictionary_vocabulary(self):
-        cover = load_text("data/sample_cover.txt")
+        cover = load_text(Path(__file__).resolve().parents[1] / "data" / "sample_cover.txt")
         words = [match.group() for match in WORD_PATTERN.finditer(cover)]
         supported = {word.casefold() for word in words if len(synonym_codebook(word, 4)) >= 2}
         self.assertGreaterEqual(len(supported), 35)

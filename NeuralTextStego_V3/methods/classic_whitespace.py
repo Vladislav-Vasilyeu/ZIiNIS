@@ -45,11 +45,13 @@ class ClassicWhitespaceMethod(StegoMethod):
 
         try:
             payload, encrypted = prepare_payload(secret, password)
+            bits = frame_payload_bits(payload) if not use_marker else text_to_bits(payload)
         except Exception as exc:
             return MethodResult(success=False, message=f"Ошибка шифрования: {exc}")
 
-        bits = frame_payload_bits(payload) if not use_marker else text_to_bits(payload)
         needed = len(bits)
+        # Reusing a container with NBSP must not prepend unencoded one-bits.
+        cover_text = cover_text.replace(NBSP, SPACE)
         # Позиции обычных пробелов
         positions = [i for i, ch in enumerate(cover_text) if ch == SPACE]
         if len(positions) < needed and not use_marker:

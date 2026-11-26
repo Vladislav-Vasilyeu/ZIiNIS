@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from pathlib import Path
 
 from methods.classic_synonyms import ClassicSynonymsMethod
 from methods.classic_whitespace import ClassicWhitespaceMethod
@@ -87,7 +88,7 @@ class SynonymsRoundTrip(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ext.secret, secret)
 
     async def test_expanded_sample_cover_round_trip_without_marker(self):
-        cover = load_text("data/sample_cover.txt")
+        cover = load_text(Path(__file__).resolve().parents[1] / "data" / "sample_cover.txt")
         method = ClassicSynonymsMethod(num_candidates=4)
         emb = await method.embed(secret="sample", cover_text=cover, use_marker=False)
         self.assertTrue(emb.success, emb.message)

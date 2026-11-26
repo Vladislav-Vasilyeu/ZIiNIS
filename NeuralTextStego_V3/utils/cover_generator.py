@@ -11,6 +11,23 @@ import random
 import re
 from typing import Any
 
+from utils.capacity import assess_capacity, payload_size, plan_cover
+
+
+def ensure_cover_capacity(text: str, secret: str, method: str, *, password: str | None = None) -> str:
+    """Add clearly templated prose until the actual codec can fit the payload."""
+    capacity = assess_capacity(text, secret, method, password=password)
+    if capacity is None or capacity.sufficient:
+        return text
+    sentence = (
+        "Современная система помогает решать важные задачи. "
+        "Пользователь выбирает метод, проверка определяет результат. "
+        "Обработка информации позволяет создать документ."
+    )
+    unit = assess_capacity(sentence, secret, method, password=password).available
+    repeats = math.ceil((capacity.required - capacity.available) / unit)
+    return text + "\n\n" + "\n".join([sentence] * repeats)
+
 _SENTENCES = [
     "Информационные технологии продолжают стремительно развиваться и влиять на все сферы жизни.",
     "Современные системы обработки данных позволяют эффективно решать сложные аналитические задачи.",
@@ -35,7 +52,7 @@ _SYNONYM_FRIENDLY = (
 
 def _bits_for_secret(secret: str) -> int:
     # +16 бит префикса длины для режима без маркера
-    return max(8, len(secret.encode("utf-8")) * 8) + 16
+    return max(8, payload_size(secret) * 8) + 16
 
 
 def generate_cover_local(secret: str, method: str = "classic_synonyms", *, seed: int | None = None) -> str:
@@ -71,18 +88,21 @@ def generate_cover_local(secret: str, method: str = "classic_synonyms", *, seed:
     return intro + body
 
 
-def build_llm_cover_prompt(secret: str, method: str) -> str:
+def build_llm_cover_prompt(secret: str, method: str, *, password: str | None = None,
+                          use_marker: bool = False) -> str:
     """Промпт для LLM-генерации контейнера под секрет и метод."""
-    n_chars = max(400, len(secret) * 40)
+    plan = plan_cover(secret, method, password=password, use_marker=use_marker)
+    required = plan.required_bits
     method = (method or "").lower()
     if method == "classic_whitespace":
         extra = (
             "В тексте должно быть много обычных пробелов между словами "
-            "(не меньше 100 пробелов). Пиши связными предложениями."
+            f"(не меньше {max(100, required)} пробелов). Пиши связными предложениями."
         )
     elif method == "classic_synonyms":
         extra = (
-            "Используй разнообразную лексику: метод, способ, алгоритм, данные, "
+            f"Нужно не менее {math.ceil(required / 2)} вхождений слов из следующего набора. "
+            "Используй лексику: метод, способ, алгоритм, данные, "
             "система, защита, анализ, исследование, документ, сообщение, "
             "современный, быстрый, естественный — в разных формах."
         )
@@ -92,8 +112,8 @@ def build_llm_cover_prompt(secret: str, method: str) -> str:
             "Сделай естественное введение, которое удобно продолжать."
         )
     return (
-        f"Напиши связный научно-популярный текст на русском языке объёмом примерно "
-        f"{n_chars} символов по теме защиты информации и стеганографии. "
+        f"Напиши связный научно-популярный текст на русском языке объёмом не менее "
+        f"{plan.target_words} слов по теме защиты информации и стеганографии. "
         f"{extra} "
         "Без списков, без заголовков, без кавычек вокруг всего текста, только абзацы."
     )
@@ -106,7 +126,11 @@ async def generate_cover_for_secret_async(
     provider_name: str = "ollama",
     model: str | None = None,
     allow_local_fallback: bool = True,
-) -> str:
+    password: str | None = None,
+    return_report: bool = False,
+    use_marker: bool = False,
+    max_rounds: int = 3,
+) -> str | tuple[str, str]:
     """
     Сгенерировать контейнер через нейросеть (Ollama/Tooken Club/Groq).
     При ошибке — локальный шаблон.
@@ -114,28 +138,45 @@ async def generate_cover_for_secret_async(
     if not secret or not secret.strip():
         raise ValueError("Секрет пуст")
 
-    prompt = build_llm_cover_prompt(secret, method)
+    method = method.lower().strip()
+    plan = plan_cover(secret, method, password=password, use_marker=use_marker)
+    prompt = build_llm_cover_prompt(secret, method, password=password, use_marker=use_marker)
+    source = "нейросеть"
     try:
         from providers.factory import create_logits_provider
 
         provider = create_logits_provider(provider_name, model=model)
+        text = ""
         try:
-            if hasattr(provider, "complete_text"):
-                text = await provider.complete_text(prompt, max_tokens=500)
-            else:
-                text = ""
+            for attempt in range(max(1, min(max_rounds, 5))):
+                fragment = (await provider.complete_text(prompt, max_tokens=plan.max_tokens) or "").strip()
+                if fragment:
+                    text = (text + "\n\n" + fragment).strip()
+                capacity = assess_capacity(text, secret, method, password=password, use_marker=use_marker)
+                if len(text) >= 80 and (capacity is None or capacity.sufficient):
+                    return (text, f"нейросеть: {attempt + 1} запрос(а)") if return_report else text
+                deficit = capacity.required - capacity.available if capacity else 0
+                prompt = (
+                    build_llm_cover_prompt(secret, method, password=password, use_marker=use_marker)
+                    + f" Уже подготовленного текста недостаточно: не хватает {max(0, deficit)} бит ёмкости. "
+                    "Напиши дополнительные абзацы, не повторяй прежний текст. "
+                    + "Последний фрагмент для согласования темы:\n" + text[-1200:]
+                )
         finally:
             await provider.close()
         text = (text or "").strip()
         if len(text) >= 80:
-            return text
+            prepared = ensure_cover_capacity(text, secret, method, password=password)
+            source = "нейросеть + локальное дополнение по ёмкости" if prepared != text else source
+            return (prepared, source) if return_report else prepared
         if not allow_local_fallback:
             raise RuntimeError("Модель вернула слишком короткий текст для контейнера.")
     except Exception:
         if not allow_local_fallback:
             raise
 
-    return generate_cover_local(secret, method)
+    prepared = ensure_cover_capacity(generate_cover_local(secret, method), secret, method, password=password)
+    return (prepared, "локальный шаблон: модель недоступна или ответ слишком короткий") if return_report else prepared
 
 
 # Синхронная обёртка для старых вызовов

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+import time
 
 from methods.base import MethodKind, MethodResult, ProgressCallback, StegoMethod
 from methods.neural_common import NeuralGenerativeCodec
@@ -20,7 +21,8 @@ class _NeuralBase(StegoMethod):
         self._codec = NeuralGenerativeCodec(provider, self.strategy, **codec_kwargs)
 
     async def embed(self, **kwargs: Any) -> MethodResult:
-        return await self._codec.embed(
+        started = time.perf_counter()
+        result = await self._codec.embed(
             secret=kwargs.get("secret", ""),
             prompt=kwargs.get("prompt") or kwargs.get("cover_text") or "",
             password=kwargs.get("password"),
@@ -29,6 +31,29 @@ class _NeuralBase(StegoMethod):
             cancel_event=kwargs.get("cancel_event"),
             method_name=self.kind.value,
         )
+        if result.success and not kwargs.get("use_marker", True):
+            progress = kwargs.get("progress")
+            if progress:
+                pending = progress(0.99, "Проверка обратного извлечения…")
+                if hasattr(pending, "__await__"):
+                    await pending
+            verified = await self._extract_with_current_provider(
+                stego_text=result.text,
+                prompt=kwargs.get("prompt") or kwargs.get("cover_text") or "",
+                password=kwargs.get("password"), use_marker=False,
+                cancel_event=kwargs.get("cancel_event"),
+            )
+            result.details["roundtrip_verified"] = verified.success and verified.secret == kwargs.get("secret", "")
+            if not result.details["roundtrip_verified"]:
+                result.success = False
+                result.details["verification_error"] = verified.message
+                result.message = (
+                    "Контрольное извлечение не подтвердило сообщение. "
+                    "Распределения модели оказались несовместимыми при повторном запросе. "
+                    "Повторите операцию или выберите другой контекст/модель."
+                )
+        result.elapsed_sec = time.perf_counter() - started
+        return result
 
     async def extract(self, **kwargs: Any) -> MethodResult:
         result = await self._extract_with_current_provider(**kwargs)

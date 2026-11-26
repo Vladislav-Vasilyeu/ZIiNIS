@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import queue
 import threading
 import time
 import tkinter as tk
@@ -19,6 +20,7 @@ from utils.cover_generator import generate_cover_for_secret_async, generate_cove
 from utils.file_handlers import load_text, save_text
 from utils.experiment_results import write_experiment_csv
 from utils.logger import setup_logger
+from utils.capacity import assess_capacity, payload_size, plan_cover
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -45,7 +47,12 @@ class NeuralTextStegoApp(ctk.CTk):
         self.geometry("1240x820")
         self.minsize(1080, 700)
         self.configure(fg_color=BG)
-        self._cancel_event: asyncio.Event | None = None
+        self._cancel_event: threading.Event | None = None
+        self._busy = False
+        self._callbacks = queue.SimpleQueue()
+        self._closing = False
+        self._last_embed = None
+        self.protocol("WM_DELETE_WINDOW", self._close_app)
         self._load_ui_state()
         self._build_ui()
 
@@ -61,10 +68,19 @@ class NeuralTextStegoApp(ctk.CTk):
             "models": {},
             "use_marker": settings.use_marker_by_default,
         }
-        path = self._state_path()
+        try:
+            path = self._state_path()
+        except OSError:
+            return
         if path.exists():
             try:
                 saved = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(saved, dict):
+                    return
+                if saved.get("method") not in METHOD_LABELS:
+                    saved.pop("method", None)
+                if not isinstance(saved.get("use_marker"), bool):
+                    saved.pop("use_marker", None)
                 if saved.get("provider") not in LOGITS_PROVIDERS:
                     saved.pop("provider", None)
                 if not isinstance(saved.get("models"), dict):
@@ -155,13 +171,20 @@ class NeuralTextStegoApp(ctk.CTk):
         footer.grid_columnconfigure(0, weight=1)
         self.status = ctk.CTkLabel(footer, text="Готово", anchor="w", text_color=TEXT)
         self.status.grid(row=0, column=0, sticky="ew", padx=16, pady=(8, 0))
+        self.btn_cancel = ctk.CTkButton(footer, text="Отменить операцию", width=150,
+            command=self._cancel_operation, state="disabled", fg_color=DANGER)
+        self.btn_cancel.grid(row=0, column=1, rowspan=2, padx=16)
+
         self.metrics = ctk.CTkLabel(footer, text="", anchor="w", text_color=MUTED)
         self.metrics.grid(row=1, column=0, sticky="ew", padx=16)
         self.progress = ctk.CTkProgressBar(
             footer, progress_color=ACCENT, fg_color=CARD, height=8
         )
-        self.progress.grid(row=2, column=0, sticky="ew", padx=16, pady=(6, 12))
+        self.progress.grid(row=2, column=0, columnspan=2, sticky="ew", padx=16, pady=(6, 12))
         self.progress.set(0)
+        self._capacity_after = None
+        self._watch_capacity()
+        self._pump_callbacks()
 
     def _method_frame(self, parent, row: int, *, marker_var: ctk.BooleanVar | None = None):
         frame = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=10)
@@ -210,9 +233,8 @@ class NeuralTextStegoApp(ctk.CTk):
         tab.grid_rowconfigure(6, weight=2)
         self.embed_method_var, self.use_marker_var = self._method_frame(tab, 0)
 
-        ctk.CTkLabel(tab, text="Контейнер / промпт", text_color=MUTED).grid(
-            row=1, column=0, sticky="w", padx=12, pady=(4, 0)
-        )
+        self.cover_label = ctk.CTkLabel(tab, text="Текст-контейнер", text_color=MUTED)
+        self.cover_label.grid(row=1, column=0, sticky="w", padx=12, pady=(4, 0))
         ctk.CTkLabel(tab, text="Секретное сообщение", text_color=MUTED).grid(
             row=1, column=1, sticky="w", padx=12, pady=(4, 0)
         )
@@ -227,10 +249,11 @@ class NeuralTextStegoApp(ctk.CTk):
             tools, text="Загрузить файл", width=140, fg_color=CARD, hover_color="#273653",
             command=self._load_cover,
         ).pack(side="left")
-        ctk.CTkButton(
+        self.btn_generate = ctk.CTkButton(
             tools, text="Сгенерировать контейнер", width=200,
             fg_color=ACCENT, hover_color=ACCENT_HOVER, command=self._generate_cover,
-        ).pack(side="left", padx=8)
+        )
+        self.btn_generate.pack(side="left", padx=8)
         ctk.CTkButton(
             tools, text="Копировать контейнер", width=170, fg_color=CARD, hover_color="#273653",
             command=lambda: self._copy_from(self.cover_text, "Контейнер скопирован"),
@@ -268,6 +291,8 @@ class NeuralTextStegoApp(ctk.CTk):
             command=self._save_stego,
         ).pack(side="right")
 
+        self.capacity_label = ctk.CTkLabel(tab, text="", text_color=MUTED, anchor="w")
+        self.capacity_label.grid(row=5, column=0, columnspan=2, sticky="ew", padx=12)
         self.stego_result = self._textbox(tab, 150)
         self.stego_result.grid(row=6, column=0, columnspan=2, sticky="nsew", padx=12, pady=8)
 
@@ -367,9 +392,68 @@ class NeuralTextStegoApp(ctk.CTk):
             "Если маркер выключен, секрет кодируется только в самом тексте:\n"
             "для нейросетевых методов при извлечении укажите тот же промпт."
         )
-        ctk.CTkLabel(tab, text=info, justify="left", wraplength=820, text_color=TEXT).grid(
-            row=0, column=0, sticky="w", padx=20, pady=20
-        )
+        guide_path = settings.project_root / "data" / "user_guide.txt"
+        try:
+            info = guide_path.read_text(encoding="utf-8")
+        except OSError:
+            pass
+        tab.grid_columnconfigure(0, weight=1)
+        tab.grid_rowconfigure(0, weight=1)
+        guide = self._textbox(tab, 500)
+        guide.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
+        guide.insert("1.0", info)
+        guide.configure(state="disabled")
+
+    def _post_ui(self, callback) -> None:
+        if not self._closing:
+            self._callbacks.put(callback)
+
+    def _pump_callbacks(self) -> None:
+        if self._closing:
+            return
+        while not self._callbacks.empty():
+            callback = self._callbacks.get_nowait()
+            try:
+                callback()
+            except Exception as exc:
+                self.report_callback_exception(type(exc), exc, exc.__traceback__)
+        self.after(50, self._pump_callbacks)
+
+    def _watch_capacity(self) -> None:
+        if self._closing:
+            return
+        inputs = (self._box_text(self.cover_text), self._box_text(self.secret_text),
+                  self._selected_method(), self.embed_password.get() or None,
+                  bool(self.use_marker_var.get()))
+        if hash(inputs) == getattr(self, "_capacity_inputs", None):
+            self._capacity_after = self.after(500, self._watch_capacity)
+            return
+        self._capacity_inputs = hash(inputs)
+        self.cover_label.configure(text="Исходный контекст (промпт)" if inputs[2] in NEURAL_KINDS else "Текст-контейнер")
+        try:
+            capacity = assess_capacity(*inputs[:3], password=inputs[3], use_marker=inputs[4])
+            if capacity:
+                suffix = " · полный секрет также записывается в маркер" if self.use_marker_var.get() else ""
+                self.capacity_label.configure(text=capacity.describe() + suffix,
+                    text_color=MUTED if capacity.sufficient else DANGER)
+            else:
+                plan = plan_cover(inputs[1], inputs[2], password=inputs[3], use_marker=inputs[4])
+                self.capacity_label.configure(text=(f"Нагрузка: {plan.required_bits} бит · минимум {plan.minimum_positions} "
+                    f"шагов генерации · лимит {settings.max_gen_tokens}. Точная длина зависит от модели."))
+        except ValueError as exc:
+            self.capacity_label.configure(text=str(exc), text_color=DANGER)
+        self._capacity_after = self.after(500, self._watch_capacity)
+
+    def _close_app(self) -> None:
+        self._closing = True
+        if self._cancel_event:
+            self._cancel_event.set()
+        if self._capacity_after:
+            self.after_cancel(self._capacity_after)
+        self._save_ui_state()
+        for timer in self.tk.call("after", "info"):
+            self.tk.call("after", "cancel", timer)
+        self.destroy()
 
     def _selected_provider(self) -> str:
         return PROVIDER_BY_LABEL[self.provider_var.get()]
@@ -394,6 +478,8 @@ class NeuralTextStegoApp(ctk.CTk):
         self._save_ui_state()
 
     def _refresh_models(self) -> None:
+        if self._busy:
+            return
         provider_name = self._selected_provider()
         label = LOGITS_PROVIDERS[provider_name]
         self.btn_models.configure(state="disabled")
@@ -456,9 +542,13 @@ class NeuralTextStegoApp(ctk.CTk):
             return
         self.extract_input.delete("1.0", tk.END)
         self.extract_input.insert("1.0", text)
-        self.extract_method_var.set(self.embed_method_var.get())
-        self.extract_marker_var.set(self.use_marker_var.get())
-        prompt = self._box_text(self.cover_text, strip=True)
+        self.extract_method_var.set(self._last_embed["method"] if self._last_embed else self.embed_method_var.get())
+        self.extract_marker_var.set(self._last_embed["marker"] if self._last_embed else self.use_marker_var.get())
+        if self._last_embed:
+            self.provider_var.set(LOGITS_PROVIDERS[self._last_embed["provider"]])
+            self._show_provider_model()
+            self.model_menu.set(self._last_embed["model"] or "")
+        prompt = self._last_embed["prompt"] if self._last_embed else self._box_text(self.cover_text)
         self.extract_prompt.delete(0, tk.END)
         self.extract_prompt.insert(0, prompt)
         self.tabview.set("Извлечение")
@@ -468,14 +558,17 @@ class NeuralTextStegoApp(ctk.CTk):
         path = filedialog.askopenfilename(filetypes=[("Текст", "*.txt *.docx"), ("Все", "*.*")])
         if path:
             try:
+                text = load_text(path)
                 self.cover_text.delete("1.0", tk.END)
-                self.cover_text.insert("1.0", load_text(path))
+                self.cover_text.insert("1.0", text)
                 self._set_status(f"Загружен: {Path(path).name}")
             except Exception as exc:
                 messagebox.showerror("Ошибка", str(exc))
 
     def _generate_cover(self) -> None:
-        secret = self._box_text(self.secret_text, strip=True)
+        if self._busy:
+            return
+        secret = self._box_text(self.secret_text)
         if not secret:
             messagebox.showwarning(
                 "Секрет не введён",
@@ -487,13 +580,27 @@ class NeuralTextStegoApp(ctk.CTk):
         method_key = LABEL_TO_KEY.get(self.embed_method_var.get(), "classic_synonyms")
         provider = self._selected_provider()
         model = self._selected_model()
-        self._set_status(f"Генерация контейнера через {LOGITS_PROVIDERS[provider]}…")
+        password = self.embed_password.get() or None
+        use_marker = bool(self.use_marker_var.get())
+        try:
+            plan = plan_cover(secret, method_key, password=password, use_marker=use_marker)
+        except ValueError as exc:
+            messagebox.showwarning("Проверка сообщения", str(exc))
+            return
+        if method_key in NEURAL_KINDS and not use_marker and plan.minimum_positions > settings.max_gen_tokens:
+            messagebox.showwarning("Сообщение превышает лимит",
+                f"Нужно не менее {plan.minimum_positions} шагов, лимит — {settings.max_gen_tokens}. "
+                "Сократите сообщение или увеличьте MAX_GEN_TOKENS в .env и перезапустите приложение.")
+            return
+        self._set_status(f"Подготовка через {LOGITS_PROVIDERS[provider]}: {plan.required_bits} бит нагрузки…")
+        self._set_metrics(f"Полезная нагрузка: {plan.payload_bytes} байт · ориентир: {plan.target_words} слов")
         self._set_progress(0.2)
 
         async def task():
             return await generate_cover_for_secret_async(
                 secret, method=method_key, provider_name=provider, model=model,
                 allow_local_fallback=provider == "ollama",
+                password=password, return_report=True, use_marker=use_marker,
             )
 
         def done(cover, error):
@@ -502,14 +609,15 @@ class NeuralTextStegoApp(ctk.CTk):
                 messagebox.showerror("Ошибка генерации", str(error))
                 self._set_status("Ошибка генерации контейнера")
                 return
+            cover, source = cover
             self.cover_text.delete("1.0", tk.END)
             self.cover_text.insert("1.0", cover)
-            bits = len(secret.encode("utf-8")) * 8
-            self._set_status(
-                f"Сгенерирован стегоконтейнер ({len(secret)} симв. секрета, ~{bits} бит), "
-                f"метод={method_key}, провайдер={provider}"
-            )
-            self._set_metrics(f"контейнер: {len(cover)} символов · секрет: {len(secret)} символов")
+            capacity = assess_capacity(cover, secret, method_key, password=password, use_marker=use_marker)
+            if capacity:
+                self._set_status(f"Готово: {capacity.describe()} · источник: {source}")
+            else:
+                self._set_status(f"Промпт подготовлен · источник: {source}. Стеготекст создаст кнопка «Внедрить».")
+            self._set_metrics(f"контейнер/контекст: {len(cover)} символов · нагрузка с заголовком: {plan.required_bits} бит")
             self._set_progress(1.0)
 
         self._run_async(task(), done)
@@ -518,8 +626,9 @@ class NeuralTextStegoApp(ctk.CTk):
         path = filedialog.askopenfilename(filetypes=[("Текст", "*.txt *.docx"), ("Все", "*.*")])
         if path:
             try:
+                text = load_text(path)
                 self.extract_input.delete("1.0", tk.END)
-                self.extract_input.insert("1.0", load_text(path))
+                self.extract_input.insert("1.0", text)
                 self._set_status(f"Загружен: {Path(path).name}")
             except Exception as exc:
                 messagebox.showerror("Ошибка", str(exc))
@@ -543,22 +652,74 @@ class NeuralTextStegoApp(ctk.CTk):
             self._set_status("Отмена…")
 
     def _run_async(self, coro, on_done) -> None:
+        if self._busy:
+            coro.close()
+            return
+        self._busy = True
+        self._cancel_event = threading.Event()
+        self.btn_cancel_embed.configure(state="normal")
+        self.btn_cancel_extract.configure(state="normal")
+        self.btn_cancel.configure(state="normal")
+        for button in (self.btn_embed, self.btn_extract, self.btn_exp, self.btn_generate, self.btn_models):
+            button.configure(state="disabled")
+        original_done = on_done
+
+        def on_done(result, error):
+            self._busy = False
+            self._cancel_event = None
+            self.btn_cancel_embed.configure(state="disabled")
+            self.btn_cancel_extract.configure(state="disabled")
+            self.btn_cancel.configure(state="disabled")
+            if error:
+                self._set_status(str(error))
+                self._set_progress(0)
+            for button in (self.btn_embed, self.btn_extract, self.btn_exp, self.btn_generate, self.btn_models):
+                button.configure(state="normal")
+            original_done(result, error)
+
+        cancel_event = self._cancel_event
+
+        async def cancellable():
+            job = asyncio.create_task(coro)
+            try:
+                while not job.done():
+                    if cancel_event.is_set():
+                        job.cancel()
+                        try:
+                            await job
+                        except asyncio.CancelledError:
+                            pass
+                        raise RuntimeError("Операция отменена")
+                    await asyncio.sleep(0.05)
+                return await job
+            finally:
+                if not job.done():
+                    job.cancel()
+                    try:
+                        await job
+                    except asyncio.CancelledError:
+                        pass
+
         def worker():
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                result = loop.run_until_complete(coro)
-                self.after(0, lambda: on_done(result, None))
+                result = loop.run_until_complete(cancellable())
+                if not self._closing:
+                    self._post_ui(lambda: on_done(result, None))
             except Exception as exc:
-                self.after(0, lambda error=exc: on_done(None, error))
+                if not self._closing:
+                    self._post_ui(lambda error=exc: on_done(None, error))
             finally:
                 loop.close()
 
         threading.Thread(target=worker, daemon=True).start()
 
     def _start_embed(self) -> None:
+        if self._busy:
+            return
         cover = self._box_text(self.cover_text)
-        secret = self._box_text(self.secret_text, strip=True)
+        secret = self._box_text(self.secret_text)
         if not secret:
             messagebox.showwarning("Внимание", "Укажите секрет")
             return
@@ -569,15 +730,30 @@ class NeuralTextStegoApp(ctk.CTk):
         if method_key in NEURAL_KINDS and not cover.strip():
             cover = "Продолжи связный текст на русском языке:\n"
 
+        try:
+            capacity = assess_capacity(cover, secret, method_key,
+                                      password=self.embed_password.get() or None,
+                                      use_marker=bool(self.use_marker_var.get()))
+            payload_size(secret, self.embed_password.get() or None)
+        except ValueError as exc:
+            messagebox.showwarning("Проверка сообщения", str(exc))
+            return
+        if capacity and not capacity.sufficient and not self.use_marker_var.get():
+            self._set_status(capacity.describe())
+            messagebox.showwarning("Контейнер слишком мал",
+                capacity.describe() + "\nНе хватает " + str(capacity.required - capacity.available) +
+                " бит.\nНажмите «Сгенерировать контейнер», увеличьте текст или сократите сообщение. "
+                "Для синонимов важны слова из словаря, а не общая длина текста.")
+            return
         self.btn_embed.configure(state="disabled")
         self.btn_cancel_embed.configure(state="normal")
-        self._cancel_event = asyncio.Event()
+        self._cancel_event = threading.Event()
         self._set_status("Внедрение…")
         self._set_progress(0)
         self._set_metrics("")
         self._save_ui_state()
 
-        password = self.embed_password.get().strip() or None
+        password = self.embed_password.get() or None
         provider = self._selected_provider()
         model = self._selected_model()
         use_marker = bool(self.use_marker_var.get())
@@ -586,7 +762,7 @@ class NeuralTextStegoApp(ctk.CTk):
             method = create_method(method_key, logits_provider=provider, model=model)
 
             async def progress(p, msg):
-                self.after(0, lambda: (self._set_progress(p), self._set_status(msg)))
+                self._post_ui(lambda: (self._set_progress(p), self._set_status(msg)))
 
             try:
                 return await method.embed(
@@ -616,7 +792,8 @@ class NeuralTextStegoApp(ctk.CTk):
             self.stego_result.delete("1.0", tk.END)
             self.stego_result.insert("1.0", result.text)
             self.extract_prompt.delete(0, tk.END)
-            self.extract_prompt.insert(0, cover.strip())
+            self.extract_prompt.insert(0, cover)
+            self._last_embed = dict(prompt=cover, method=METHOD_LABELS[method_key], marker=use_marker, provider=provider, model=model)
             self._set_status(result.message)
             self._set_metrics(
                 f"бит={result.bits_embedded} · шагов={result.positions_used} · "
@@ -627,6 +804,8 @@ class NeuralTextStegoApp(ctk.CTk):
         self._run_async(task(), done)
 
     def _start_extract(self) -> None:
+        if self._busy:
+            return
         stego = self._box_text(self.extract_input)
         if not stego.strip():
             messagebox.showwarning("Внимание", "Укажите стеготекст")
@@ -634,11 +813,11 @@ class NeuralTextStegoApp(ctk.CTk):
         method_key = LABEL_TO_KEY.get(self.extract_method_var.get(), "classic_synonyms")
         self.btn_extract.configure(state="disabled")
         self.btn_cancel_extract.configure(state="normal")
-        self._cancel_event = asyncio.Event()
+        self._cancel_event = threading.Event()
         self._set_status("Извлечение…")
         self._set_progress(0)
 
-        password = self.extract_password.get().strip() or None
+        password = self.extract_password.get() or None
         provider = self._selected_provider()
         model = self._selected_model()
         use_marker = bool(self.extract_marker_var.get())
@@ -648,7 +827,7 @@ class NeuralTextStegoApp(ctk.CTk):
             method = create_method(method_key, logits_provider=provider, model=model)
 
             async def progress(p, msg):
-                self.after(0, lambda: (self._set_progress(p), self._set_status(msg)))
+                self._post_ui(lambda: (self._set_progress(p), self._set_status(msg)))
 
             try:
                 return await method.extract(
@@ -667,6 +846,7 @@ class NeuralTextStegoApp(ctk.CTk):
             self.btn_cancel_extract.configure(state="disabled")
             self._cancel_event = None
             if error:
+                self._set_status("Ошибка: " + str(error))
                 messagebox.showerror("Ошибка", str(error))
                 return
             if not result.success:
@@ -684,16 +864,29 @@ class NeuralTextStegoApp(ctk.CTk):
         self._run_async(task(), done)
 
     def _start_experiments(self) -> None:
+        if self._busy:
+            return
         try:
-            runs = max(1, int(self.exp_runs.get().strip() or "5"))
+            runs = int(self.exp_runs.get())
         except ValueError:
-            runs = 5
-        secret = self.exp_secret.get().strip() or "test"
+            messagebox.showwarning("Повторы", "Введите целое число от 1 до 100")
+            return
+        if not 1 <= runs <= 100:
+            messagebox.showwarning("Повторы", "Введите число от 1 до 100")
+            return
+        secret = self.exp_secret.get()
+        if not secret:
+            messagebox.showwarning("Секрет", "Введите сообщение для эксперимента")
+            return
         method_key = LABEL_TO_KEY.get(self.exp_method_var.get(), "classic_synonyms")
         provider = self._selected_provider()
         model = self._selected_model()
         use_marker = bool(self.exp_marker_var.get())
-        cover = generate_cover_local(secret, method_key, seed=42)
+        try:
+            cover = generate_cover_local(secret, method_key, seed=42)
+        except ValueError as exc:
+            messagebox.showwarning("Проверка сообщения", str(exc))
+            return
 
         self.btn_exp.configure(state="disabled")
         self.exp_log.delete("1.0", tk.END)
@@ -722,7 +915,7 @@ class NeuralTextStegoApp(ctk.CTk):
                         )
                         ok = ext.success and ext.secret == secret
                     dt = time.perf_counter() - t0
-                    msg = emb.message if emb else ""
+                    msg = ext.message if emb.success and not ok else emb.message
                     rows.append([
                         i + 1,
                         ok,
@@ -731,8 +924,7 @@ class NeuralTextStegoApp(ctk.CTk):
                         f"{dt:.3f}",
                         msg,
                     ])
-                    self.after(
-                        0,
+                    self._post_ui(
                         lambda i=i, ok=ok, dt=dt: self.exp_log.insert(
                             tk.END, f"#{i+1} ok={ok} t={dt:.2f}s\n"
                         ),
@@ -748,6 +940,7 @@ class NeuralTextStegoApp(ctk.CTk):
         def done(path, error):
             self.btn_exp.configure(state="normal")
             if error:
+                self._set_status("Ошибка: " + str(error))
                 messagebox.showerror("Ошибка", str(error))
                 return
             self._set_status(f"Эксперименты сохранены: {path}")

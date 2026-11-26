@@ -93,6 +93,10 @@ class OllamaLogitsProvider(LogitsProvider):
                 "num_ctx": settings.ollama_num_ctx,
             },
         }
+        if self.raw_continuation:
+            # We use the distribution, not the randomly sampled token. A fixed
+            # seed also makes empty EOS responses reproducible during decoding.
+            body["options"]["seed"] = 0
 
         last_err: Exception | None = None
         for attempt in range(1, settings.max_retries + 1):
@@ -112,10 +116,27 @@ class OllamaLogitsProvider(LogitsProvider):
 
                 data = resp.json()
                 result = self._parse_logprobs_payload(data, top_k)
-                if len(result) >= 2:
+                if self.raw_continuation and not result and data.get("done_reason") == "stop" and not data.get("response"):
+                    # Ollama can sample EOS and omit its logprobs. Probe a small
+                    # fixed sequence of seeds to retrieve actual model scores.
+                    for seed in range(1, 8):
+                        body["options"]["seed"] = seed
+                        retry = await client.post("/api/generate", json=body)
+                        if retry.status_code != 200:
+                            raise RuntimeError(f"Ollama error {retry.status_code}: {retry.text[:400]}")
+                        data = retry.json()
+                        result = self._parse_logprobs_payload(data, top_k)
+                        if result:
+                            break
+                if result and (self.raw_continuation or len(result) >= 2):
                     return result
 
                 if self.raw_continuation:
+                    if data.get("done_reason") == "stop" and not data.get("response"):
+                        raise RuntimeError(
+                            "Модель завершила продолжение до записи всех битов и не вернула распределение. "
+                            "Используйте другой исходный контекст или сократите сообщение."
+                        )
                     raise RuntimeError(
                         "Ollama не вернула top_logprobs для продолжения текста. "
                         "Обновите сервер или выберите модель с поддержкой logprobs."
